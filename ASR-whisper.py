@@ -38,21 +38,13 @@ asr = pipeline(
 )
 
 def format_time(seconds):
-    """
-    Convert seconds (float) into SRT timestamp HH:MM:SS,mmm
-    """
     total_millis = int(round(seconds * 1000))
     hours, rem = divmod(total_millis, 3600 * 1000)
     minutes, rem = divmod(rem, 60 * 1000)
     secs, millis = divmod(rem, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-
 def parse_whisper_chunks(chunks):
-    """
-    Take pipeline output (list of chunks) and extract a sorted, deduplicated list of words,
-    each as {'start': float, 'end': float, 'text': str}. Skips segments with zero duration.
-    """
     words = []
     seen = set()
     for chunk in chunks:
@@ -70,17 +62,10 @@ def parse_whisper_chunks(chunks):
             continue
         seen.add(key)
         words.append({'start': start, 'end': end, 'text': txt})
-    # Ensure chronological order
     words.sort(key=lambda w: w['start'])
     return words
 
-
 def group_words(words, max_chars, min_duration):
-    """
-    Group a sequence of word dicts into subtitle segments.
-    Break when segment text length exceeds max_chars and duration >= min_duration,
-    or when a word ends with . ! or ? and we have enough content.
-    """
     segments = []
     current = []
     for w in words:
@@ -92,7 +77,6 @@ def group_words(words, max_chars, min_duration):
         seg_dur = w['end'] - current[0]['start']
         last_text = current[-1]['text']
         punct = bool(last_text and last_text[-1] in '.!?')
-        # Break conditions
         if (seg_len > max_chars and seg_dur >= min_duration) or (punct and (seg_dur >= min_duration or len(current) >= 3)):
             segments.append({
                 'start': current[0]['start'],
@@ -102,7 +86,6 @@ def group_words(words, max_chars, min_duration):
             current = [w]
         else:
             current.append(w)
-    # Final flush
     if current:
         segments.append({
             'start': current[0]['start'],
@@ -111,11 +94,7 @@ def group_words(words, max_chars, min_duration):
         })
     return segments
 
-
 def write_srt(segments, srt_path, strip=False):
-    """
-    Write segments to an .srt file. Optionally strip punctuation & lowercase.
-    """
     if not segments:
         print(Fore.YELLOW + f"⚠ No segments to write for {srt_path}" + Style.RESET_ALL)
         return
@@ -128,33 +107,27 @@ def write_srt(segments, srt_path, strip=False):
             end_ts = format_time(seg['end'])
             f.write(f'{idx}\n{start_ts} --> {end_ts}\n{text}\n\n')
 
-
-def transcribe_file(audio_path, out_dir):
-    """
-    Run the ASR pipeline, save the raw chunks JSON, and return its path.
-    """
+def transcribe_file(audio_path, out_dir, save_json):
     print(Fore.CYAN + f"🔊 Transcribing: {audio_path}" + Style.RESET_ALL)
     try:
         res = asr(audio_path)
         chunks = res.get('chunks') or res.get('segments') or []
         base = os.path.splitext(os.path.basename(audio_path))[0]
-        json_fp = os.path.join(out_dir, f"{base}.json")
-        with open(json_fp, 'w', encoding='utf-8') as jf:
-            json.dump(chunks, jf, ensure_ascii=False, indent=2)
-        print(Fore.GREEN + f"✔ JSON saved: {json_fp}" + Style.RESET_ALL)
-        return json_fp
+        if save_json:
+            json_fp = os.path.join(out_dir, f"{base}.json")
+            with open(json_fp, 'w', encoding='utf-8') as jf:
+                json.dump(chunks, jf, ensure_ascii=False, indent=2)
+            print(Fore.GREEN + f"✔ JSON saved: {json_fp}" + Style.RESET_ALL)
+        return chunks
     except Exception as e:
         print(Fore.RED + f"❌ Failed ASR on {audio_path}: {e}" + Style.RESET_ALL)
         return None
 
-
-def process_file(audio_path, out_dir, max_chars, min_duration, strip_text):
+def process_file(audio_path, out_dir, max_chars, min_duration, strip_text, save_json):
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    json_fp = transcribe_file(audio_path, out_dir)
-    if not json_fp:
+    chunks = transcribe_file(audio_path, out_dir, save_json)
+    if not chunks:
         return
-    with open(json_fp, 'r', encoding='utf-8') as jf:
-        chunks = json.load(jf)
     words = parse_whisper_chunks(chunks)
     if not words:
         print(Fore.YELLOW + f"⚠ No words for {base}" + Style.RESET_ALL)
@@ -163,7 +136,6 @@ def process_file(audio_path, out_dir, max_chars, min_duration, strip_text):
     srt_fp = os.path.join(out_dir, f"{base}.srt")
     write_srt(segments, srt_fp, strip_text)
     print(Fore.GREEN + f"✅ SRT saved: {srt_fp}" + Style.RESET_ALL)
-
 
 def main():
     try:
@@ -175,6 +147,7 @@ def main():
     except:
         min_duration = 1.0
     strip_text = input(Fore.CYAN + 'Strip punctuation & lowercase? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
+    save_json = input(Fore.CYAN + 'Save raw JSON output as well? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
 
     root = tk.Tk()
     root.withdraw()
@@ -198,7 +171,11 @@ def main():
 
     with tqdm(total=len(files), desc=Fore.GREEN + '🎬 Transcribing files' + Style.RESET_ALL) as pbar:
         with ThreadPoolExecutor(max_workers=min(4, len(files))) as executor:
-            futures = {executor.submit(process_file, f, out_dir, max_chars, min_duration, strip_text): f for f in files}
+            futures = {
+                executor.submit(
+                    process_file, f, out_dir, max_chars, min_duration, strip_text, save_json
+                ): f for f in files
+            }
             for future in as_completed(futures):
                 try:
                     future.result()
