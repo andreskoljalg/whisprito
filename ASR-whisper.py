@@ -50,8 +50,8 @@ def format_time(seconds):
 
 def parse_whisper_chunks(chunks):
     """
-    Take pipeline output (list of chunks) and extract a sorted, deduplicated list of words
-    each as {'start': float, 'end': float, 'text': str}
+    Take pipeline output (list of chunks) and extract a sorted, deduplicated list of words,
+    each as {'start': float, 'end': float, 'text': str}. Skips segments with zero duration.
     """
     words = []
     seen = set()
@@ -61,6 +61,8 @@ def parse_whisper_chunks(chunks):
         if not ts or not txt or not isinstance(ts, (list, tuple)) or len(ts) < 2:
             continue
         start, end = float(ts[0]), float(ts[1])
+        if start == end:
+            continue  # Skip zero-duration segments
         if end < start:
             end = start
         key = (start, end, txt)
