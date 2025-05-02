@@ -13,12 +13,26 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 # Initialize colorama
 init(autoreset=True)
 
+# Choose model
+available_models = {
+    "1": "openai/whisper-tiny",
+    "2": "openai/whisper-base",
+    "3": "openai/whisper-small",
+    "4": "openai/whisper-medium",
+    "5": "openai/whisper-large-v3"
+}
+
+print(Fore.CYAN + "🧠 Select a Whisper model:" + Style.RESET_ALL)
+for key, name in available_models.items():
+    print(f"{key}: {name}")
+model_choice = input(Fore.CYAN + "Enter the number of the model to use (default 4): " + Style.RESET_ALL).strip()
+model_id = available_models.get(model_choice, "openai/whisper-medium")
+
 # Device and dtype configuration
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-model_id = 'openai/whisper-large-v3'
 
-print(Fore.CYAN + '🔄 Loading Whisper model...' + Style.RESET_ALL)
+print(Fore.CYAN + f'🔄 Loading Whisper model: {model_id}' + Style.RESET_ALL)
 model = AutoModelForSpeechSeq2Seq.from_pretrained(
     model_id,
     torch_dtype=dtype,
