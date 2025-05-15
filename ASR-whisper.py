@@ -13,7 +13,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 # Initialize colorama
 init(autoreset=True)
 
-# Choose model
+# Model choices
 available_models = {
     "1": "openai/whisper-tiny",
     "2": "openai/whisper-base",
@@ -28,7 +28,7 @@ for key, name in available_models.items():
 model_choice = input(Fore.CYAN + "Enter the number of the model to use (default 4): " + Style.RESET_ALL).strip()
 model_id = available_models.get(model_choice, "openai/whisper-medium")
 
-# Device and dtype configuration
+# Device & dtype
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
@@ -52,11 +52,11 @@ asr = pipeline(
 )
 
 def format_time(seconds):
-    total_millis = int(round(seconds * 1000))
-    hours, rem = divmod(total_millis, 3600 * 1000)
-    minutes, rem = divmod(rem, 60 * 1000)
-    secs, millis = divmod(rem, 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+    ms = int(round(seconds * 1000))
+    h, rem = divmod(ms, 3600*1000)
+    m, rem = divmod(rem, 60*1000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def parse_whisper_chunks(chunks):
     words = []
@@ -66,9 +66,9 @@ def parse_whisper_chunks(chunks):
         txt = chunk.get('text', '').strip()
         if not ts or not txt or not isinstance(ts, (list, tuple)) or len(ts) < 2:
             continue
+        if ts[0] is None or ts[1] is None:
+            continue
         start, end = float(ts[0]), float(ts[1])
-        if start == end:
-            continue  # Skip zero-duration segments
         if end < start:
             end = start
         key = (start, end, txt)
@@ -89,13 +89,13 @@ def group_words(words, max_chars, min_duration):
         seg_text = ' '.join(item['text'] for item in current + [w]).strip()
         seg_len = len(seg_text)
         seg_dur = w['end'] - current[0]['start']
-        last_text = current[-1]['text']
-        punct = bool(last_text and last_text[-1] in '.!?')
+        last = current[-1]['text']
+        punct = last and last[-1] in '.!?'
         if (seg_len > max_chars and seg_dur >= min_duration) or (punct and (seg_dur >= min_duration or len(current) >= 3)):
             segments.append({
                 'start': current[0]['start'],
-                'end': current[-1]['end'],
-                'text': ' '.join(item['text'] for item in current)
+                'end':   current[-1]['end'],
+                'text':  ' '.join(item['text'] for item in current)
             })
             current = [w]
         else:
@@ -103,8 +103,8 @@ def group_words(words, max_chars, min_duration):
     if current:
         segments.append({
             'start': current[0]['start'],
-            'end': current[-1]['end'],
-            'text': ' '.join(item['text'] for item in current)
+            'end':   current[-1]['end'],
+            'text':  ' '.join(item['text'] for item in current)
         })
     return segments
 
@@ -113,13 +113,13 @@ def write_srt(segments, srt_path, strip=False):
         print(Fore.YELLOW + f"⚠ No segments to write for {srt_path}" + Style.RESET_ALL)
         return
     with open(srt_path, 'w', encoding='utf-8') as f:
-        for idx, seg in enumerate(segments, start=1):
+        for i, seg in enumerate(segments, start=1):
             text = seg['text']
             if strip:
                 text = text.replace('.', '').replace(',', '').lower()
-            start_ts = format_time(seg['start'])
-            end_ts = format_time(seg['end'])
-            f.write(f'{idx}\n{start_ts} --> {end_ts}\n{text}\n\n')
+            f.write(f"{i}\n")
+            f.write(f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
+            f.write(f"{text}\n\n")
 
 def transcribe_file(audio_path, out_dir, save_json):
     print(Fore.CYAN + f"🔊 Transcribing: {audio_path}" + Style.RESET_ALL)
@@ -128,10 +128,10 @@ def transcribe_file(audio_path, out_dir, save_json):
         chunks = res.get('chunks') or res.get('segments') or []
         base = os.path.splitext(os.path.basename(audio_path))[0]
         if save_json:
-            json_fp = os.path.join(out_dir, f"{base}.json")
-            with open(json_fp, 'w', encoding='utf-8') as jf:
+            jp = os.path.join(out_dir, f"{base}.json")
+            with open(jp, 'w', encoding='utf-8') as jf:
                 json.dump(chunks, jf, ensure_ascii=False, indent=2)
-            print(Fore.GREEN + f"✔ JSON saved: {json_fp}" + Style.RESET_ALL)
+            print(Fore.GREEN + f"✔ JSON saved: {jp}" + Style.RESET_ALL)
         return chunks
     except Exception as e:
         print(Fore.RED + f"❌ Failed ASR on {audio_path}: {e}" + Style.RESET_ALL)
@@ -146,55 +146,57 @@ def process_file(audio_path, out_dir, max_chars, min_duration, strip_text, save_
     if not words:
         print(Fore.YELLOW + f"⚠ No words for {base}" + Style.RESET_ALL)
         return
-    segments = group_words(words, max_chars, min_duration)
+
+    segs = group_words(words, max_chars, min_duration)
+
+    # —— new: ensure no zero-length cues ——
+    for seg in segs:
+        if seg['end'] <= seg['start']:
+            seg['end'] = seg['start'] + min_duration
+
     srt_fp = os.path.join(out_dir, f"{base}.srt")
-    write_srt(segments, srt_fp, strip_text)
+    write_srt(segs, srt_fp, strip_text)
     print(Fore.GREEN + f"✅ SRT saved: {srt_fp}" + Style.RESET_ALL)
 
 def main():
     try:
-        max_chars = int(input(Fore.CYAN + 'Max characters per segment: ' + Style.RESET_ALL).strip())
+        max_c = int(input(Fore.CYAN + 'Max characters per segment: ' + Style.RESET_ALL).strip())
     except:
-        max_chars = 30
+        max_c = 30
     try:
-        min_duration = float(input(Fore.CYAN + 'Min segment duration (sec): ' + Style.RESET_ALL).strip())
+        min_d = float(input(Fore.CYAN + 'Min segment duration (sec): ' + Style.RESET_ALL).strip())
     except:
-        min_duration = 1.0
-    strip_text = input(Fore.CYAN + 'Strip punctuation & lowercase? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
-    save_json = input(Fore.CYAN + 'Save raw JSON output as well? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
+        min_d = 1.0
+    strip = input(Fore.CYAN + 'Strip punctuation & lowercase? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
+    save_j = input(Fore.CYAN + 'Save raw JSON output as well? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
 
-    root = tk.Tk()
-    root.withdraw()
-    root.update()
+    root = tk.Tk(); root.withdraw(); root.update()
     files = filedialog.askopenfilenames(
         title='🎧 Select audio files to transcribe',
-        filetypes=[('Audio files', '*.wav *.mp3 *.m4a'), ('All files', '*.*')]
+        filetypes=[('Audio files','*.wav *.mp3 *.m4a'),('All files','*.*')]
     )
     if not files:
         print(Fore.RED + 'No files selected. Exiting.' + Style.RESET_ALL)
         return
+
     print(Fore.CYAN + f"\n🎧 You selected {len(files)} file(s):" + Style.RESET_ALL)
     for f in files:
         print(Fore.YELLOW + '- ' + os.path.basename(f) + Style.RESET_ALL)
     root.update()
-    out_dir = filedialog.askdirectory(title='📁 Select folder where .srt files will be saved')
+    out_dir = filedialog.askdirectory(title='📁 Select output folder')
     if not out_dir:
-        print(Fore.RED + 'No output folder selected. Exiting.' + Style.RESET_ALL)
+        print(Fore.RED + 'No output folder. Exiting.' + Style.RESET_ALL)
         return
     root.destroy()
 
     with tqdm(total=len(files), desc=Fore.GREEN + '🎬 Transcribing files' + Style.RESET_ALL) as pbar:
-        with ThreadPoolExecutor(max_workers=min(4, len(files))) as executor:
-            futures = {
-                executor.submit(
-                    process_file, f, out_dir, max_chars, min_duration, strip_text, save_json
-                ): f for f in files
-            }
-            for future in as_completed(futures):
+        with ThreadPoolExecutor(max_workers=min(4,len(files))) as ex:
+            futures = {ex.submit(process_file, f, out_dir, max_c, min_d, strip, save_j): f for f in files}
+            for fut in as_completed(futures):
                 try:
-                    future.result()
+                    fut.result()
                 except Exception as e:
-                    print(Fore.RED + f"⚠️ Error on {futures[future]}: {e}" + Style.RESET_ALL)
+                    print(Fore.RED + f"⚠️ Error on {futures[fut]}: {e}" + Style.RESET_ALL)
                 finally:
                     pbar.update(1)
 
