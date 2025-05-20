@@ -10,10 +10,10 @@ from tkinter import filedialog
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
-# Initialize colorama
+# initialize colorama
 init(autoreset=True)
 
-# Model choices
+# model choices
 available_models = {
     "1": "openai/whisper-tiny",
     "2": "openai/whisper-base",
@@ -28,7 +28,7 @@ for key, name in available_models.items():
 model_choice = input(Fore.CYAN + "Enter the number of the model to use (default 4): " + Style.RESET_ALL).strip()
 model_id = available_models.get(model_choice, "openai/whisper-medium")
 
-# Device & dtype
+# device & dtype
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
@@ -149,7 +149,7 @@ def process_file(audio_path, out_dir, max_chars, min_duration, strip_text, save_
 
     segs = group_words(words, max_chars, min_duration)
 
-    # —— new: ensure no zero-length cues ——
+    # —— ensure no zero-length cues ——
     for seg in segs:
         if seg['end'] <= seg['start']:
             seg['end'] = seg['start'] + min_duration
