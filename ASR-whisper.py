@@ -58,54 +58,97 @@ def format_time(seconds):
     s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+# Punctuation sets
+STRONG_END = ('.', '!', '?', '…')
+SOFT_END = (',', ';', ':')
+
 def parse_whisper_chunks(chunks):
+    """
+    Parse HF Whisper pipeline 'chunks' (with return_timestamps='word').
+    - Keeps words with valid (start, end).
+    - If a chunk is pure punctuation with missing timestamps, attach it to the previous word.
+    This allows comma-based splitting even when commas arrive as separate, untimed tokens.
+    """
     words = []
-    seen = set()
-    for chunk in chunks:
-        ts = chunk.get('timestamp') or chunk.get('timestamps')
-        txt = chunk.get('text', '').strip()
-        if not ts or not txt or not isinstance(ts, (list, tuple)) or len(ts) < 2:
+    for ch in chunks:
+        txt = (ch.get('text') or '').strip()
+        ts = ch.get('timestamp') or ch.get('timestamps')
+
+        # Normalize timestamp
+        start = end = None
+        if isinstance(ts, (list, tuple)) and len(ts) >= 2:
+            start, end = ts[0], ts[1]
+
+        # If this token is pure punctuation (e.g., "," or ".") and lacks timing,
+        # glue it to the previous word so the segmentation logic can see it.
+        if txt and all(c in ''.join(STRONG_END + SOFT_END) for c in txt) and (start is None or end is None):
+            if words:
+                words[-1]['text'] += txt  # attach punctuation to previous word
             continue
-        if ts[0] is None or ts[1] is None:
-            continue
-        start, end = float(ts[0]), float(ts[1])
-        if end < start:
-            end = start
-        key = (start, end, txt)
-        if key in seen:
-            continue
-        seen.add(key)
-        words.append({'start': start, 'end': end, 'text': txt})
+
+        # Regular word with timings
+        if txt and start is not None and end is not None:
+            start = float(start)
+            end = float(end)
+            if end < start:
+                end = start
+            words.append({'start': start, 'end': end, 'text': txt})
+
+    # Ensure chronological order
     words.sort(key=lambda w: w['start'])
     return words
 
 def group_words(words, max_chars, min_duration):
+    """
+    Group words into segments with these rules:
+      - Never split a word.
+      - Hard break after SOFT_END (comma/semicolon/colon) or STRONG_END (.,!?,…),
+        regardless of min_duration — this fixes the 'first word after comma' bug.
+      - Otherwise, if adding next word exceeds max_chars and current segment duration
+        is at least min_duration, finalize the segment.
+    """
     segments = []
     current = []
+
+    def flush_current():
+        if current:
+            segments.append({
+                'start': current[0]['start'],
+                'end':   current[-1]['end'],
+                'text':  ' '.join(item['text'] for item in current).strip()
+            })
+
     for w in words:
         if not current:
             current = [w]
             continue
+
+        last_text = current[-1]['text'].rstrip()
+
+        # If last word ended with comma/semicolon/colon -> hard break BEFORE adding w
+        if last_text.endswith(SOFT_END):
+            flush_current()
+            current = [w]
+            continue
+
+        # If last word ended with a strong terminator -> hard break BEFORE adding w
+        if last_text.endswith(STRONG_END):
+            flush_current()
+            current = [w]
+            continue
+
+        # Otherwise consider char/length rule
         seg_text = ' '.join(item['text'] for item in current + [w]).strip()
         seg_len = len(seg_text)
         seg_dur = w['end'] - current[0]['start']
-        last = current[-1]['text']
-        punct = last and last[-1] in '.!?'
-        if (seg_len > max_chars and seg_dur >= min_duration) or (punct and (seg_dur >= min_duration or len(current) >= 3)):
-            segments.append({
-                'start': current[0]['start'],
-                'end':   current[-1]['end'],
-                'text':  ' '.join(item['text'] for item in current)
-            })
+
+        if seg_len > max_chars and seg_dur >= min_duration:
+            flush_current()
             current = [w]
         else:
             current.append(w)
-    if current:
-        segments.append({
-            'start': current[0]['start'],
-            'end':   current[-1]['end'],
-            'text':  ' '.join(item['text'] for item in current)
-        })
+
+    flush_current()
     return segments
 
 def write_srt(segments, srt_path, strip=False):
@@ -190,7 +233,7 @@ def main():
     root.destroy()
 
     with tqdm(total=len(files), desc=Fore.GREEN + '🎬 Transcribing files' + Style.RESET_ALL) as pbar:
-        with ThreadPoolExecutor(max_workers=min(4,len(files))) as ex:
+        with ThreadPoolExecutor(max_workers=1) as ex:
             futures = {ex.submit(process_file, f, out_dir, max_c, min_d, strip, save_j): f for f in files}
             for fut in as_completed(futures):
                 try:
