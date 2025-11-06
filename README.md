@@ -28,17 +28,19 @@ Perfect for podcasts, interviews, or Estonian audio content. 🇪🇪
 
 ---
 
+
 ## 🛠️ Usage
 
 1. Run the script:
    ```bash
-   python3 ASR-converter.py
+   python3 ASR-whisper.py
    ```
 
 2. Follow the interactive prompts:
-   - Max characters per subtitle
-   - Min duration per segment
-   - Punctuation stripping
+   - Max characters per subtitle (recommended for social media: 10)
+   - Min duration per segment (recommended for social media: 1)
+   - Punctuation stripping 
+   - Raw json saving (for debugging only)
    - Select audio files
    - Choose output folder
 
@@ -65,13 +67,5 @@ today we're testing whisper's transcription accuracy
 - Uses Hugging Face’s 🤗 Transformers `pipeline()` API
 - Model: `openai/whisper-large-v3`
 - Automatically selects GPU (if available)
-
----
-
-## 💡 Future ideas
-
-- Optional diarization
-- Auto language detection
-- Web interface
 
 ---
