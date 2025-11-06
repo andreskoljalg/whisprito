@@ -1,7 +1,45 @@
 #!/usr/bin/env python3
-import os
+import os, sys, subprocess
+
+# --- Auto setup virtualenv ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VENV_DIR = os.path.join(BASE_DIR, "venv")
+PY_BIN = os.path.join(VENV_DIR, "bin", "python3")
+
+# If not already inside venv
+if not sys.executable.startswith(VENV_DIR):
+    if not os.path.exists(VENV_DIR):
+        print("📦 Creating virtual environment...")
+        brew_python = "/opt/homebrew/bin/python3"  # Homebrew Python
+        subprocess.check_call([brew_python, "-m", "venv", VENV_DIR])
+        print("✅ venv created.")
+
+        print("📦 Installing dependencies (this may take a while the first time)...")
+        subprocess.check_call([PY_BIN, "-m", "pip", "install", "--upgrade", "pip"])
+        subprocess.check_call([PY_BIN, "-m", "pip", "install",
+                               "torch", "transformers", "colorama", "tqdm"])
+
+    # Relaunch inside venv
+    os.execv(PY_BIN, [PY_BIN] + sys.argv)
+
+# --- Imports (safe inside venv) ---
 os.environ['TK_SILENCE_DEPRECATION'] = '1'
 import json
+import ssl, os
+
+# Common CA bundle locations on macOS Homebrew
+possible_certs = [
+    "/opt/homebrew/etc/openssl@3/cert.pem",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt"
+]
+for path in possible_certs:
+    if os.path.exists(path):
+        os.environ['SSL_CERT_FILE'] = path
+        os.environ['REQUESTS_CA_BUNDLE'] = path
+        ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=path)
+        break
+
 import torch
 from tqdm import tqdm
 from colorama import init, Fore, Style
@@ -10,10 +48,10 @@ from tkinter import filedialog
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
-# initialize colorama
+# --- Initialize ---
 init(autoreset=True)
 
-# model choices
+# Model choices
 available_models = {
     "1": "openai/whisper-tiny",
     "2": "openai/whisper-base",
@@ -28,14 +66,14 @@ for key, name in available_models.items():
 model_choice = input(Fore.CYAN + "Enter the number of the model to use (default 4): " + Style.RESET_ALL).strip()
 model_id = available_models.get(model_choice, "openai/whisper-medium")
 
-# device & dtype
+# Device & dtype
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 print(Fore.CYAN + f'🔄 Loading Whisper model: {model_id}' + Style.RESET_ALL)
 model = AutoModelForSpeechSeq2Seq.from_pretrained(
     model_id,
-    torch_dtype=dtype,
+    dtype=dtype,
     low_cpu_mem_usage=True,
     use_safetensors=True,
     attn_implementation='eager'
@@ -47,8 +85,9 @@ asr = pipeline(
     tokenizer=processor.tokenizer,
     feature_extractor=processor.feature_extractor,
     return_timestamps='word',
-    torch_dtype=dtype,
-    device=device
+    dtype=dtype,
+    device=device,
+    generate_kwargs={"task": "transcribe"}
 )
 
 def format_time(seconds):
@@ -58,58 +97,31 @@ def format_time(seconds):
     s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-# Punctuation sets
 STRONG_END = ('.', '!', '?', '…')
 SOFT_END = (',', ';', ':')
 
 def parse_whisper_chunks(chunks):
-    """
-    Parse HF Whisper pipeline 'chunks' (with return_timestamps='word').
-    - Keeps words with valid (start, end).
-    - If a chunk is pure punctuation with missing timestamps, attach it to the previous word.
-    This allows comma-based splitting even when commas arrive as separate, untimed tokens.
-    """
     words = []
     for ch in chunks:
         txt = (ch.get('text') or '').strip()
         ts = ch.get('timestamp') or ch.get('timestamps')
-
-        # Normalize timestamp
         start = end = None
         if isinstance(ts, (list, tuple)) and len(ts) >= 2:
             start, end = ts[0], ts[1]
-
-        # If this token is pure punctuation (e.g., "," or ".") and lacks timing,
-        # glue it to the previous word so the segmentation logic can see it.
         if txt and all(c in ''.join(STRONG_END + SOFT_END) for c in txt) and (start is None or end is None):
             if words:
-                words[-1]['text'] += txt  # attach punctuation to previous word
+                words[-1]['text'] += txt
             continue
-
-        # Regular word with timings
         if txt and start is not None and end is not None:
-            start = float(start)
-            end = float(end)
+            start, end = float(start), float(end)
             if end < start:
                 end = start
             words.append({'start': start, 'end': end, 'text': txt})
-
-    # Ensure chronological order
     words.sort(key=lambda w: w['start'])
     return words
 
 def group_words(words, max_chars, min_duration):
-    """
-    Group words into segments with these rules:
-      - Never split a word.
-      - Hard break after SOFT_END (comma/semicolon/colon) or STRONG_END (.,!?,…),
-        regardless of min_duration — this fixes the 'first word after comma' bug.
-      - Otherwise, if adding next word exceeds max_chars and current segment duration
-        is at least min_duration, finalize the segment.
-    """
-    segments = []
-    current = []
-
+    segments, current = [], []
     def flush_current():
         if current:
             segments.append({
@@ -117,37 +129,19 @@ def group_words(words, max_chars, min_duration):
                 'end':   current[-1]['end'],
                 'text':  ' '.join(item['text'] for item in current).strip()
             })
-
     for w in words:
         if not current:
             current = [w]
             continue
-
         last_text = current[-1]['text'].rstrip()
-
-        # If last word ended with comma/semicolon/colon -> hard break BEFORE adding w
-        if last_text.endswith(SOFT_END):
-            flush_current()
-            current = [w]
-            continue
-
-        # If last word ended with a strong terminator -> hard break BEFORE adding w
-        if last_text.endswith(STRONG_END):
-            flush_current()
-            current = [w]
-            continue
-
-        # Otherwise consider char/length rule
+        if last_text.endswith(SOFT_END) or last_text.endswith(STRONG_END):
+            flush_current(); current = [w]; continue
         seg_text = ' '.join(item['text'] for item in current + [w]).strip()
-        seg_len = len(seg_text)
-        seg_dur = w['end'] - current[0]['start']
-
+        seg_len, seg_dur = len(seg_text), w['end'] - current[0]['start']
         if seg_len > max_chars and seg_dur >= min_duration:
-            flush_current()
-            current = [w]
+            flush_current(); current = [w]
         else:
             current.append(w)
-
     flush_current()
     return segments
 
@@ -173,7 +167,7 @@ def transcribe_file(audio_path, out_dir, save_json):
         if save_json:
             jp = os.path.join(out_dir, f"{base}.json")
             with open(jp, 'w', encoding='utf-8') as jf:
-                json.dump(chunks, jf, ensure_ascii=False, indent=2)
+                import json; json.dump(chunks, jf, ensure_ascii=False, indent=2)
             print(Fore.GREEN + f"✔ JSON saved: {jp}" + Style.RESET_ALL)
         return chunks
     except Exception as e:
@@ -183,33 +177,24 @@ def transcribe_file(audio_path, out_dir, save_json):
 def process_file(audio_path, out_dir, max_chars, min_duration, strip_text, save_json):
     base = os.path.splitext(os.path.basename(audio_path))[0]
     chunks = transcribe_file(audio_path, out_dir, save_json)
-    if not chunks:
-        return
+    if not chunks: return
     words = parse_whisper_chunks(chunks)
     if not words:
         print(Fore.YELLOW + f"⚠ No words for {base}" + Style.RESET_ALL)
         return
-
     segs = group_words(words, max_chars, min_duration)
-
-    # —— ensure no zero-length cues ——
     for seg in segs:
         if seg['end'] <= seg['start']:
             seg['end'] = seg['start'] + min_duration
-
     srt_fp = os.path.join(out_dir, f"{base}.srt")
     write_srt(segs, srt_fp, strip_text)
     print(Fore.GREEN + f"✅ SRT saved: {srt_fp}" + Style.RESET_ALL)
 
 def main():
-    try:
-        max_c = int(input(Fore.CYAN + 'Max characters per segment: ' + Style.RESET_ALL).strip())
-    except:
-        max_c = 30
-    try:
-        min_d = float(input(Fore.CYAN + 'Min segment duration (sec): ' + Style.RESET_ALL).strip())
-    except:
-        min_d = 1.0
+    try: max_c = int(input(Fore.CYAN + 'Max characters per segment: ' + Style.RESET_ALL).strip())
+    except: max_c = 30
+    try: min_d = float(input(Fore.CYAN + 'Min segment duration (sec): ' + Style.RESET_ALL).strip())
+    except: min_d = 1.0
     strip = input(Fore.CYAN + 'Strip punctuation & lowercase? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
     save_j = input(Fore.CYAN + 'Save raw JSON output as well? (y/n): ' + Style.RESET_ALL).strip().lower() == 'y'
 
@@ -219,29 +204,23 @@ def main():
         filetypes=[('Audio files','*.wav *.mp3 *.m4a'),('All files','*.*')]
     )
     if not files:
-        print(Fore.RED + 'No files selected. Exiting.' + Style.RESET_ALL)
-        return
-
+        print(Fore.RED + 'No files selected. Exiting.' + Style.RESET_ALL); return
     print(Fore.CYAN + f"\n🎧 You selected {len(files)} file(s):" + Style.RESET_ALL)
-    for f in files:
-        print(Fore.YELLOW + '- ' + os.path.basename(f) + Style.RESET_ALL)
+    for f in files: print(Fore.YELLOW + '- ' + os.path.basename(f) + Style.RESET_ALL)
     root.update()
     out_dir = filedialog.askdirectory(title='📁 Select output folder')
     if not out_dir:
-        print(Fore.RED + 'No output folder. Exiting.' + Style.RESET_ALL)
-        return
+        print(Fore.RED + 'No output folder. Exiting.' + Style.RESET_ALL); return
     root.destroy()
 
     with tqdm(total=len(files), desc=Fore.GREEN + '🎬 Transcribing files' + Style.RESET_ALL) as pbar:
         with ThreadPoolExecutor(max_workers=1) as ex:
             futures = {ex.submit(process_file, f, out_dir, max_c, min_d, strip, save_j): f for f in files}
             for fut in as_completed(futures):
-                try:
-                    fut.result()
+                try: fut.result()
                 except Exception as e:
                     print(Fore.RED + f"⚠️ Error on {futures[fut]}: {e}" + Style.RESET_ALL)
-                finally:
-                    pbar.update(1)
+                finally: pbar.update(1)
 
 if __name__ == '__main__':
     main()
