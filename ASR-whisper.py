@@ -70,19 +70,25 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 init(autoreset=True)
 
 # Model choices
+DEFAULT_MODEL_KEY = "6"
 available_models = {
     "1": "openai/whisper-tiny",
     "2": "openai/whisper-base",
     "3": "openai/whisper-small",
     "4": "openai/whisper-medium",
-    "5": "openai/whisper-large-v3"
+    "5": "openai/whisper-large-v3",
+    "6": "TalTechNLP/whisper-large-v3-turbo-et-verbatim",  # Estonian, verbatim-tuned
+    "7": "TalTechNLP/whisper-medium-et",                   # Estonian, lighter/faster
 }
 
 print(Fore.CYAN + "Select a Whisper model:" + Style.RESET_ALL)
 for key, name in available_models.items():
     print(f"{key}: {name}")
-model_choice = input(Fore.CYAN + "Enter the number of the model to use (default 4): " + Style.RESET_ALL).strip()
-model_id = available_models.get(model_choice, "openai/whisper-medium")
+model_choice = input(
+    Fore.CYAN + f"Enter the number of the model to use (default {DEFAULT_MODEL_KEY}: "
+    f"{available_models[DEFAULT_MODEL_KEY]}): " + Style.RESET_ALL
+).strip()
+model_id = available_models.get(model_choice, available_models[DEFAULT_MODEL_KEY])
 
 # --- Device & dtype ---
 # Priority: CUDA GPU > Apple Silicon MPS > CPU
@@ -120,13 +126,19 @@ except TypeError:
 
 processor = AutoProcessor.from_pretrained(model_id)
 
+# If the chosen model is an Estonian-specific fine-tune, pin the language so
+# Whisper's language-detection step can't misidentify short or noisy clips.
+generate_kwargs = {"task": "transcribe"}
+if model_id.endswith("-et") or model_id.endswith("-et-verbatim"):
+    generate_kwargs["language"] = "et"
+
 pipeline_kwargs = dict(
     model=model,
     tokenizer=processor.tokenizer,
     feature_extractor=processor.feature_extractor,
     return_timestamps='word',
     device=device,
-    generate_kwargs={"task": "transcribe"},
+    generate_kwargs=generate_kwargs,
     # Long-form chunking: Whisper's native window is 30s, these let the
     # pipeline handle longer files without a manual sliding-window loop.
     chunk_length_s=30,
