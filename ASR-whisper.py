@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os, sys, shutil, subprocess
+import warnings
+warnings.filterwarnings("ignore", message=".*resource_tracker.*leaked.*")
 
 # --- Auto setup virtualenv ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -253,7 +255,7 @@ pipeline_kwargs = dict(
     stride_length_s=5,
     # Process the resulting chunks together instead of one at a time -
     # matters once a file is long enough to be split into multiple chunks.
-    batch_size=8,
+    batch_size=1,
 )
 try:
     asr = pipeline('automatic-speech-recognition', dtype=dtype, **pipeline_kwargs)
@@ -410,17 +412,27 @@ def transcribe_file(audio_path, out_dir, save_json):
 
 def process_file(audio_path, out_dir, max_chars, min_duration, strip_text, save_json):
     base = os.path.splitext(os.path.basename(audio_path))[0]
+    log(Fore.MAGENTA + f"[CHECKPOINT 1] Starting transcription of {base}" + Style.RESET_ALL)
+    
     chunks = transcribe_file(audio_path, out_dir, save_json)
     if not chunks:
         return
+    log(Fore.MAGENTA + f"[CHECKPOINT 2] Got {len(chunks)} chunks" + Style.RESET_ALL)
+    
     words = parse_whisper_chunks(chunks)
     if not words:
         log(Fore.YELLOW + f"No words for {base}" + Style.RESET_ALL)
         return
+    log(Fore.MAGENTA + f"[CHECKPOINT 3] Parsed {len(words)} words" + Style.RESET_ALL)
+    
     segs = group_words(words, max_chars, min_duration)
+    log(Fore.MAGENTA + f"[CHECKPOINT 4] Grouped into {len(segs)} segments" + Style.RESET_ALL)
+    
     for seg in segs:
         if seg['end'] <= seg['start']:
             seg['end'] = seg['start'] + min_duration
+    log(Fore.MAGENTA + f"[CHECKPOINT 5] About to write SRT" + Style.RESET_ALL)
+    
     srt_fp = os.path.join(out_dir, f"{base}.srt")
     write_srt(segs, srt_fp, strip_text)
     log(Fore.GREEN + f"SRT saved: {srt_fp}" + Style.RESET_ALL)
